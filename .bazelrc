@@ -1,0 +1,48 @@
+# .bazelrc
+
+run --color=yes
+build --color=yes
+
+build --client_env=CC=clang
+
+build --cxxopt=-std=c++23
+
+build --copt=-Wall
+build --copt=-Wextra
+build --copt=-Wconversion
+build --copt=-Wpedantic
+build --copt=-Werror
+
+# Address Sanitizer (ASan)
+build:asan --strip=never
+build:asan --copt=-fsanitize=address
+build:asan --linkopt=-fsanitize=address
+build:asan --copt=-fno-omit-frame-pointer
+build:asan --copt=-O1
+build:asan --copt=-g
+
+# Memory Sanitizer (MSan)
+build:msan --strip=never
+build:msan --copt=-fsanitize=memory
+build:msan --linkopt=-fsanitize=memory
+build:msan --copt=-fno-omit-frame-pointer
+build:msan --copt=-fsanitize-memory-track-origins
+build:msan --copt=-fsanitize-memory-use-after-dtor
+build:msan --copt=-O1
+build:msan --copt=-g
+
+# Undefined Behaviour Sanitizer (UBSan)
+build:ubsan --strip=never
+build:ubsan --copt=-fsanitize=undefined
+build:ubsan --linkopt=-fsanitize=undefined
+build:ubsan --copt=-fno-omit-frame-pointer
+build:ubsan --copt=-O1
+build:ubsan --copt=-g
+
+# Thread Sanitizer (TSan)
+build:tsan --strip=never
+build:tsan --copt=-fsanitize=thread
+build:tsan --linkopt=-fsanitize=thread
+build:tsan --copt=-fno-omit-frame-pointer
+build:tsan --copt=-O1
+build:tsan --copt=-g
