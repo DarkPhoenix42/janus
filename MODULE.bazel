@@ -15,3 +15,6 @@ git_override(
 
 # Testing
 bazel_dep(name = "googletest", version = "1.17.0.bcr.2")
+
+# Benchmarking
+bazel_dep(name = "google_benchmark", version = "1.9.5")
