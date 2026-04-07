@@ -4,16 +4,11 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
-#include <new>
 #include <utility>
 
-namespace janus::common {
+#include "include/common/constants.h"
 
-#ifdef __cpp_lib_hardware_interference_size
-constexpr size_t kCacheLineSize = std::hardware_destructive_interference_size;
-#else
-constexpr size_t kCacheLineSize = 64;
-#endif
+namespace janus::common {
 
 template <typename T> union StorageItem {
     T item_;
@@ -108,7 +103,7 @@ public:
     [[nodiscard]] bool is_empty() const noexcept {
         return pop_idx_.load(std::memory_order_relaxed) == push_idx_.load(std::memory_order_acquire);
     }
-    
+
     // Only the writer/producer thread can call this.
     [[nodiscard]] bool is_full() const noexcept {
         size_t next_push_idx = (push_idx_.load(std::memory_order_relaxed) + 1) & (N - 1);
