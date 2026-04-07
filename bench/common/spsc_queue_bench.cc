@@ -70,7 +70,7 @@ void BM_Spsc_CrossThread_Throughput(benchmark::State& state) {
     // Consumer thread
     std::thread consumer([&] {
         if (consumer_cpu >= 0) {
-            utils::pin_thread(consumer_cpu);
+            utils::pin_self_to_core(consumer_cpu);
         }
 
         ready.store(true, std::memory_order_release);
@@ -85,7 +85,7 @@ void BM_Spsc_CrossThread_Throughput(benchmark::State& state) {
 
     // Producer (benchmark thread)
     if (producer_cpu >= 0) {
-        utils::pin_thread(producer_cpu);
+        utils::pin_self_to_core(producer_cpu);
     }
 
     while (!ready.load(std::memory_order_acquire)) {
@@ -129,7 +129,7 @@ void BM_Spsc_PingPong_Latency(benchmark::State& state) {
     // Thread B: echo everything it receives back to A
     std::thread thread_b([&] {
         if (cpu_b >= 0) {
-            utils::pin_thread(cpu_b);
+            utils::pin_self_to_core(cpu_b);
         }
 
         ready.store(true, std::memory_order_release);
@@ -144,7 +144,7 @@ void BM_Spsc_PingPong_Latency(benchmark::State& state) {
     });
 
     if (cpu_a >= 0) {
-        utils::pin_thread(cpu_a);
+        utils::pin_self_to_core(cpu_a);
     }
     // Wait for B to start
     while (!ready.load(std::memory_order_acquire)) {
@@ -193,7 +193,7 @@ void BM_Spsc_CrossThread_FatPayload(benchmark::State& state) {
 
     std::thread consumer([&] {
         if (consumer_cpu >= 0) {
-            utils::pin_thread(consumer_cpu);
+            utils::pin_self_to_core(consumer_cpu);
         }
 
         ready.store(true, std::memory_order_release);
@@ -207,7 +207,7 @@ void BM_Spsc_CrossThread_FatPayload(benchmark::State& state) {
     });
 
     if (producer_cpu >= 0) {
-        utils::pin_thread(producer_cpu);
+        utils::pin_self_to_core(producer_cpu);
     }
 
     FatItem item{};
