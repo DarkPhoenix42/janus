@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <thread>
 
+#include "include/common/constants.h"
 #include "include/common/spsc_queue.h"
 #include "include/common/utils.h"
 
@@ -11,225 +12,144 @@ using namespace janus::common;
 
 namespace {
 
-constexpr size_t kQueueSize = 1024;  // power-of-two
+constexpr size_t kQueueSize = 16'777'216;  // power-of-two
+constexpr size_t kIters = 10'000'000;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1. Single-threaded round-trip cost
-//    Push N items then pop N items on the same thread.
-//    Measures pure throughput with no cache-line ping-pong.
-// ─────────────────────────────────────────────────────────────────────────────
-void BM_Spsc_SingleThread_Throughput(benchmark::State& state) {
-    SpscQueue<uint64_t, kQueueSize> q;
-    const size_t batch = kQueueSize / 2;  // stay well under capacity
+constexpr uint64_t kProducerCore = 0;
+constexpr uint64_t kConsumerCore = 2;
 
-    for (auto _ : state) {
-        for (size_t i = 0; i < batch; ++i) {
-            benchmark::DoNotOptimize(q.emplace(i));
-        }
+template <size_t ItemSize> struct Item {
+    std::array<uint8_t, ItemSize> data;
+};
 
-        uint64_t val{};
-        for (size_t i = 0; i < batch; ++i) {
-            benchmark::DoNotOptimize(q.pop(val));
-        }
-    }
-    state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) * static_cast<int64_t>(batch));
-}
-
-BENCHMARK(BM_Spsc_SingleThread_Throughput)->Unit(benchmark::kNanosecond);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. Single-item latency (single-threaded)
-//    Push one item, pop one item.  Isolates per-operation overhead.
-// ─────────────────────────────────────────────────────────────────────────────
-void BM_Spsc_SingleThread_OneItem(benchmark::State& state) {
-    SpscQueue<uint64_t, kQueueSize> q;
-    uint64_t val{};
+// Producer and consumer on the same core.
+template <size_t ItemSize> void BM_Spsc_SingleThread_Throughput(benchmark::State& state) {
+    SpscQueue<Item<ItemSize>, kQueueSize> q;
+    Item<ItemSize> item{};
 
     for (auto _ : state) {
-        benchmark::DoNotOptimize(q.emplace(42ULL));
-        benchmark::DoNotOptimize(q.pop(val));
+        q.emplace(item);
+        q.pop(item);
     }
-    state.SetItemsProcessed(state.iterations());
 }
 
-BENCHMARK(BM_Spsc_SingleThread_OneItem)->Unit(benchmark::kNanosecond);
+#define REGISTER_SINGLE_THREAD(Size) \
+    BENCHMARK_TEMPLATE(BM_Spsc_SingleThread_Throughput, Size)->Iterations(kIters)->Unit(benchmark::kNanosecond)
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. Cross-thread throughput (the real benchmark)
-//    Producer and consumer on separate threads (and optionally pinned CPUs).
-//    Reports throughput and sets the latency counter via items processed.
-// ─────────────────────────────────────────────────────────────────────────────
-void BM_Spsc_CrossThread_Throughput(benchmark::State& state) {
-    const int producer_cpu = static_cast<int>(state.range(0));
-    const int consumer_cpu = static_cast<int>(state.range(1));
+REGISTER_SINGLE_THREAD(4);
+REGISTER_SINGLE_THREAD(8);
+REGISTER_SINGLE_THREAD(16);
+REGISTER_SINGLE_THREAD(32);
+REGISTER_SINGLE_THREAD(64);
+REGISTER_SINGLE_THREAD(128);
 
-    SpscQueue<uint64_t, kQueueSize> q;
-    std::atomic<bool> stop{false};
-    std::atomic<bool> ready{false};
+//Producer and consumer on separate cores.
+template <size_t ItemSize> void BM_Spsc_CrossThread_Throughput(benchmark::State& state) {
+
+    SpscQueue<Item<ItemSize>, kQueueSize> q;
+    alignas(kCacheLineSize) std::atomic<bool> stop{false};
+    alignas(kCacheLineSize) std::atomic<bool> ready{false};
 
     // Consumer thread
     std::thread consumer([&] {
-        if (consumer_cpu >= 0) {
-            utils::pin_self_to_core(consumer_cpu);
+        if (kConsumerCore >= 0) {
+            utils::pin_self_to_core(kConsumerCore);
         }
 
         ready.store(true, std::memory_order_release);
 
-        uint64_t val{};
-        while (!stop.load(std::memory_order_acquire) || !q.is_empty()) {
-            if (q.pop(val)) {
-                benchmark::DoNotOptimize(val);
-            }
+        Item<ItemSize> item{};
+        while (!stop.load(std::memory_order_acquire)) {
+            q.pop(item);
         }
     });
 
-    // Producer (benchmark thread)
-    if (producer_cpu >= 0) {
-        utils::pin_self_to_core(producer_cpu);
+    // Producer
+    if (kProducerCore >= 0) {
+        utils::pin_self_to_core(kProducerCore);
     }
 
     while (!ready.load(std::memory_order_acquire)) {
     }
 
-    uint64_t produced = 0;
+    Item<ItemSize> item{};
     for (auto _ : state) {
-        while (!q.emplace(produced)) {
-        }
-        ++produced;
+        q.emplace(item);
     }
 
     stop.store(true, std::memory_order_release);
+    (void)q.try_emplace(item);
     consumer.join();
-
-    state.SetItemsProcessed(static_cast<int64_t>(produced));
 }
 
-BENCHMARK(BM_Spsc_CrossThread_Throughput)
-    ->Args({0, 1})  // pinned, same physical core (hyperthreads)
-    ->Args({0, 2})  // pinned, likely different physical cores
-    ->Unit(benchmark::kNanosecond)
-    ->UseRealTime();  // wall time matters for cross-thread
+#define REGISTER_CROSS_THREAD(Size)                          \
+    BENCHMARK_TEMPLATE(BM_Spsc_CrossThread_Throughput, Size) \
+        ->Iterations(kIters)                                 \
+        ->Unit(benchmark::kNanosecond)                       \
+        ->UseRealTime()
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. Round-trip latency (ping-pong)
-//    Measures producer→consumer→producer latency for a single token.
-//    This is the closest you can get to "how long does one hop take?"
-// ─────────────────────────────────────────────────────────────────────────────
-void BM_Spsc_PingPong_Latency(benchmark::State& state) {
-    const int cpu_a = static_cast<int>(state.range(0));
-    const int cpu_b = static_cast<int>(state.range(1));
+REGISTER_CROSS_THREAD(4);
+REGISTER_CROSS_THREAD(8);
+REGISTER_CROSS_THREAD(16);
+REGISTER_CROSS_THREAD(32);
+REGISTER_CROSS_THREAD(64);
+REGISTER_CROSS_THREAD(128);
 
-    // Two queues: A→B and B→A
-    SpscQueue<uint64_t, 2> a_to_b;
-    SpscQueue<uint64_t, 2> b_to_a;
+// Measures producer->consume->producer latency for a single token.
+template <size_t ItemSize> void BM_Spsc_CrossThread_RTT(benchmark::State& state) {
 
-    std::atomic<bool> ready{false};
-    std::atomic<bool> stop{false};
+    // Two queues: A->B and B->A
+    SpscQueue<Item<ItemSize>, 2> a_to_b;
+    SpscQueue<Item<ItemSize>, 2> b_to_a;
 
-    // Thread B: echo everything it receives back to A
+    alignas(kCacheLineSize) std::atomic<bool> ready{false};
+    alignas(kCacheLineSize) std::atomic<bool> stop{false};
+
     std::thread thread_b([&] {
-        if (cpu_b >= 0) {
-            utils::pin_self_to_core(cpu_b);
+        if (kConsumerCore >= 0) {
+            utils::pin_self_to_core(kConsumerCore);
         }
 
         ready.store(true, std::memory_order_release);
 
-        uint64_t val{};
+        Item<ItemSize> item{};
         while (!stop.load(std::memory_order_acquire)) {
-            if (a_to_b.pop(val)) {
-                while (!b_to_a.emplace(val)) {
-                }
-            }
+            a_to_b.pop(item);
+            b_to_a.emplace(item);
         }
     });
 
-    if (cpu_a >= 0) {
-        utils::pin_self_to_core(cpu_a);
+    if (kProducerCore >= 0) {
+        utils::pin_self_to_core(kProducerCore);
     }
+
     // Wait for B to start
     while (!ready.load(std::memory_order_acquire)) {
     }
 
-    uint64_t val{};
-    uint64_t seq = 0;
+    Item<ItemSize> item{};
     for (auto _ : state) {
-        while (!a_to_b.emplace(seq)) {
-        }
-        seq++;
-        while (!b_to_a.pop(val)) {
-        }
-        assert(val == seq - 1);
+        a_to_b.emplace(item);
+        b_to_a.pop(item);
     }
 
     stop.store(true, std::memory_order_release);
-    // Unblock B if it's stuck waiting
-    (void)a_to_b.emplace(0);
+    (void)a_to_b.try_emplace(item);
     thread_b.join();
-
-    state.SetItemsProcessed(state.iterations() * 2);
 }
 
-BENCHMARK(BM_Spsc_PingPong_Latency)
-    ->Args({0, 1})  // pinned, same physical core (hyperthreads)
-    ->Args({0, 2})  // pinned, likely different physical cores
-    ->Unit(benchmark::kNanosecond)
-    ->UseRealTime();
+#define REGISTER_PING_PONG(Size)                      \
+    BENCHMARK_TEMPLATE(BM_Spsc_CrossThread_RTT, Size) \
+        ->Iterations(kIters)                          \
+        ->Unit(benchmark::kNanosecond)                \
+        ->UseRealTime()
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 5. Large payload cost
-//    Same cross-thread throughput but with a fat struct to expose move cost.
-// ─────────────────────────────────────────────────────────────────────────────
-struct FatItem {
-    std::array<uint64_t, 8> data{};  // 64 bytes — one full cache line
-};
-
-void BM_Spsc_CrossThread_FatPayload(benchmark::State& state) {
-    SpscQueue<FatItem, kQueueSize> q;
-    const int producer_cpu = static_cast<int>(state.range(0));
-    const int consumer_cpu = static_cast<int>(state.range(1));
-
-    std::atomic<bool> ready{false};
-    std::atomic<bool> stop{false};
-
-    std::thread consumer([&] {
-        if (consumer_cpu >= 0) {
-            utils::pin_self_to_core(consumer_cpu);
-        }
-
-        ready.store(true, std::memory_order_release);
-
-        FatItem item{};
-        while (!stop.load(std::memory_order_acquire) || !q.is_empty()) {
-            if (q.pop(item)) {
-                benchmark::DoNotOptimize(item);
-            }
-        }
-    });
-
-    if (producer_cpu >= 0) {
-        utils::pin_self_to_core(producer_cpu);
-    }
-
-    FatItem item{};
-    item.data[0] = 1;
-
-    while (!ready.load(std::memory_order_acquire)) {
-    }
-
-    uint64_t produced = 0;
-    for (auto _ : state) {
-        item.data[0] = produced;
-        while (!q.emplace(item)) {
-        }
-        ++produced;
-    }
-
-    stop.store(true, std::memory_order_release);
-    consumer.join();
-    state.SetItemsProcessed(static_cast<int64_t>(produced));
-}
-
-BENCHMARK(BM_Spsc_CrossThread_FatPayload)->Args({0, 1})->Args({0, 2})->Unit(benchmark::kNanosecond)->UseRealTime();
+REGISTER_PING_PONG(4);
+REGISTER_PING_PONG(8);
+REGISTER_PING_PONG(16);
+REGISTER_PING_PONG(32);
+REGISTER_PING_PONG(64);
+REGISTER_PING_PONG(128);
 
 }  // namespace
 
